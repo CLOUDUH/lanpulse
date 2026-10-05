@@ -51,7 +51,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 5,
     },
     "display": {
-        "title": "局域网性能监控",
+        "title": "LanPulse",
         "orientation": "auto",
         "rotation": 0,
         "theme": "dark",

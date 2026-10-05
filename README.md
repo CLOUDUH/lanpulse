@@ -1,4 +1,4 @@
-# Phone Performance Monitor
+# LanPulse
 
 面向 6 英寸安卓手机的轻量局域网性能看板。一个容器同时提供网页、Beszel 数据代理、爱快路由器 SNMP 采集和设置页。
 
@@ -13,7 +13,7 @@
 ## 启动
 
 ```bash
-cd /Users/cloudu/Hub/phone-performance-monitor
+cd /Users/cloudu/Hub/lanpulse
 docker compose up -d --build
 ```
 
@@ -22,6 +22,8 @@ docker compose up -d --build
 设置页面：`http://<Docker主机局域网IP>:18090/settings`
 
 首次进入设置无需 PIN。建议保存时设置至少 4 位管理 PIN。配置保存在 Docker 命名卷 `phone-performance-monitor-data` 中，更新或重新部署容器不会清除设置。
+
+项目已更名为 **LanPulse**。为兼容原有部署，底层数据卷继续使用旧名称 `phone-performance-monitor-data`，因此重新部署不会丢失现有 Beszel、SSH、天气及画面设置。
 
 ## Beszel 设置
 
@@ -106,15 +108,17 @@ docker compose build
 适用于 Portainer 管理本机 Docker Standalone 的场景：
 
 1. 进入目标环境，选择 **Stacks → Add stack → Repository**。
-2. Stack name 填写 `phone-performance-monitor`。
-3. Repository URL 填写 `https://github.com/CLOUDUH/phone-performance-monitor.git`。
+2. Stack name 填写 `lanpulse`。
+3. Repository URL 填写 `https://github.com/CLOUDUH/lanpulse.git`。
 4. Repository reference 选择 `main`，或填写 `refs/heads/main`。
 5. Compose path 填写 `compose.yaml`。
 6. 仓库为公开仓库，不需要启用 Authentication。
 7. 不需要填写额外环境变量，也不需要启用 Relative path volumes。
 8. 第一次部署建议关闭 GitOps 自动更新，点击 **Deploy the stack**。
 
-部署后确认容器 `phone-performance-monitor` 状态为 `healthy`，然后访问：
+从旧项目升级时，将现有 Stack 的 Repository URL 改为 `https://github.com/CLOUDUH/lanpulse.git` 后重新部署即可。服务与容器会改名为 `lanpulse`；如果 Portainer 提示旧容器占用 `18090` 端口，先停止并删除旧的 `phone-performance-monitor` 容器，再重新部署。不要删除 `phone-performance-monitor-data` 数据卷。
+
+部署后确认容器 `lanpulse` 状态为 `healthy`，然后访问：
 
 ```text
 仪表盘：http://<Docker主机局域网IP>:18090

@@ -34,6 +34,6 @@ jobs:
         with:
           context: .
           push: false
-          tags: phone-performance-monitor:ci
+          tags: lanpulse:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max

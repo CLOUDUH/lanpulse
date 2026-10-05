@@ -25,7 +25,7 @@ snmp = SnmpCollector()
 weather = WeatherClient()
 terminal = TerminalClient()
 sessions: dict[str, float] = {}
-app = FastAPI(title="Phone Performance Monitor", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="LanPulse", version="1.0.0", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 

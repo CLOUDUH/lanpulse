@@ -1,13 +1,13 @@
 services:
-  phone-performance-monitor:
+  lanpulse:
     build:
       context: .
-    container_name: phone-performance-monitor
+    container_name: lanpulse
     restart: unless-stopped
     ports:
       - "18090:8080"
     volumes:
-      - phone-performance-monitor-data:/data
+      - lanpulse-data:/data
     environment:
       TZ: Asia/Shanghai
       DATA_DIR: /data
@@ -17,5 +17,6 @@ services:
       - ALL
 
 volumes:
-  phone-performance-monitor-data:
+  lanpulse-data:
+    # Keep the existing Docker volume name so upgrades preserve saved settings.
     name: phone-performance-monitor-data
