@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import secrets
 import time
@@ -13,7 +14,8 @@ from pydantic import BaseModel
 from .beszel import BeszelClient
 from .calendar_info import beijing_calendar
 from .config import ConfigStore
-from .snmp import SnmpCollector, safe_sample
+from .snmp import SnmpCollector
+from .snmp_feed import SnmpFeed
 from .terminal import TerminalClient, safe_terminal
 from .weather import WeatherClient, safe_weather
 
@@ -24,8 +26,20 @@ beszel = BeszelClient()
 snmp = SnmpCollector()
 weather = WeatherClient()
 terminal = TerminalClient()
+snmp_feed = SnmpFeed(snmp, store.load)
 sessions: dict[str, float] = {}
-app = FastAPI(title="LanPulse", version="1.0.0", docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    snmp_feed.start()
+    try:
+        yield
+    finally:
+        await snmp_feed.close()
+
+
+app = FastAPI(title="LanPulse", version="1.0.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -122,17 +136,33 @@ async def snapshot():
     config = store.load()
     results = await asyncio.gather(
         beszel.snapshot(config["beszel"]),
-        safe_sample(snmp, config["snmp"]),
         safe_weather(weather, config["weather"]),
         safe_terminal(terminal, config["terminal"]),
         return_exceptions=True,
     )
     beszel_data = results[0] if not isinstance(results[0], Exception) else {"systems": [], "error": str(results[0])}
-    snmp_data = results[1] if not isinstance(results[1], Exception) else {"status": "error", "error": str(results[1])}
-    weather_data = results[2] if not isinstance(results[2], Exception) else {"status": "error", "error": str(results[2])}
-    terminal_data = results[3] if not isinstance(results[3], Exception) else {"status": "error", "error": str(results[3]), "lines": []}
+    snmp_data = snmp_feed.packet()["wan"]
+    weather_data = results[1] if not isinstance(results[1], Exception) else {"status": "error", "error": str(results[1])}
+    terminal_data = results[2] if not isinstance(results[2], Exception) else {"status": "error", "error": str(results[2]), "lines": []}
     now = time.time()
     return {"beszel": beszel_data, "wan": snmp_data, "weather": weather_data, "terminal": terminal_data, "calendar": beijing_calendar(now), "display": config["display"], "server_time": now}
+
+
+@app.get("/api/wan/snapshot")
+async def wan_snapshot():
+    return snmp_feed.packet()
+
+
+@app.get("/api/wan/events")
+async def wan_events(request: Request):
+    async def stream():
+        sequence = 0
+        while not await request.is_disconnected():
+            packet = snmp_feed.packet(sequence)
+            sequence = packet["wan"].get("sequence", sequence)
+            yield f"data: {json.dumps(packet, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.5)
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/events")
@@ -142,7 +172,6 @@ async def events(request: Request):
             config = store.load()
             results = await asyncio.gather(
                 beszel.snapshot(config["beszel"]),
-                safe_sample(snmp, config["snmp"]),
                 safe_weather(weather, config["weather"]),
                 safe_terminal(terminal, config["terminal"]),
                 return_exceptions=True,
@@ -150,9 +179,9 @@ async def events(request: Request):
             now = time.time()
             payload: dict[str, Any] = {
                 "beszel": results[0] if not isinstance(results[0], Exception) else {"systems": [], "error": str(results[0])},
-                "wan": results[1] if not isinstance(results[1], Exception) else {"status": "error", "error": str(results[1])},
-                "weather": results[2] if not isinstance(results[2], Exception) else {"status": "error", "error": str(results[2])},
-                "terminal": results[3] if not isinstance(results[3], Exception) else {"status": "error", "error": str(results[3]), "lines": []},
+                "wan": snmp_feed.packet()["wan"],
+                "weather": results[1] if not isinstance(results[1], Exception) else {"status": "error", "error": str(results[1])},
+                "terminal": results[2] if not isinstance(results[2], Exception) else {"status": "error", "error": str(results[2]), "lines": []},
                 "calendar": beijing_calendar(now),
                 "display": config["display"],
                 "server_time": now,

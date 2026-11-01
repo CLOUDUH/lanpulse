@@ -26,7 +26,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interface_index": 0,
         "upload_oid": "1.3.6.1.2.1.31.1.1.1.10.{ifIndex}",
         "download_oid": "1.3.6.1.2.1.31.1.1.1.6.{ifIndex}",
-        "poll_seconds": 2,
+        "poll_seconds": 1,
+        "counter_window_seconds": 10,
         "timeout_seconds": 2,
     },
     "weather": {

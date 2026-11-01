@@ -292,6 +292,15 @@
 
 .chart-card + .chart-card { margin-left: 24px; }
 
+.chart-title { position: relative; }
+.chart-title small {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  color: #aaa;
+  font-size: 14px;
+}
+
 .chart-title strong {
   display: block;
   color: #fff;

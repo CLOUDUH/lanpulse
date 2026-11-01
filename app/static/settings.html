@@ -29,6 +29,9 @@
         <div class="section-title"><div><span class="eyebrow">ROUTER</span><h2>爱快 SNMP</h2></div><label class="switch"><input name="snmp.enabled" type="checkbox"><span>启用</span></label></div>
         <div class="row"><div class="field grow"><label>路由器地址</label><input name="snmp.host" placeholder="192.168.1.1"></div><div class="field small"><label>端口</label><input name="snmp.port" type="number"></div></div>
         <div class="field"><label>SNMP v2c 团体名</label><input name="snmp.community" type="password" placeholder="留空则保持不变"></div>
+        <div class="field"><label>SNMP 采样间隔（秒）</label><input name="snmp.poll_seconds" type="number" min="1" max="60"></div>
+        <div class="field"><label>计数器刷新适配上限（秒，0 为关闭）</label><input name="snmp.counter_window_seconds" type="number" min="0" max="30"></div>
+        <p class="muted">适配路由器计数器分批刷新：重复计数器短暂保持上次估算速率，再次变化时按完整间隔计算。默认上限 10 秒；设为 0 显示逐次差分的原始速率。</p>
         <div class="row"><div class="field grow"><label>WAN 接口</label><select name="snmp.interface_index"><option value="0">路由器就位后发现</option></select></div><button type="button" id="discover-snmp" class="button ghost align-end">发现接口</button></div>
         <details><summary>高级 OID</summary><div class="field"><label>下载计数器 OID</label><input name="snmp.download_oid"></div><div class="field"><label>上传计数器 OID</label><input name="snmp.upload_oid"></div></details>
       </section>

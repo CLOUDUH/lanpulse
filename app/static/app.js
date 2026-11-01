@@ -6,10 +6,12 @@
   var lastData = null;
   var lastHistoryTime = 0;
   var lastRouterSampleTime = 0;
+  var routerGeneration = null;
+  var routerServerTime = 0;
+  var routerSampleState = "";
   var history = { router: [], devices: [] };
   var historyLimit = 60;
   var chartWindowSeconds = 120;
-  var chartMaximums = {};
   var clockEpoch = Date.now();
   var clockReceivedAt = Date.now();
   var slots = [
@@ -125,21 +127,6 @@
 
   function rememberNetwork(data, matched) {
     var timestamp = Number(data.server_time) || Date.now() / 1000;
-    var wan = data.wan || {};
-    var routerTime = Number(wan.sampled_at);
-    if (wan.status === "disabled") {
-      history.router = [];
-      lastRouterSampleTime = 0;
-    } else if (isFinite(routerTime) && routerTime > lastRouterSampleTime) {
-      lastRouterSampleTime = routerTime;
-      history.router.push({
-        time: routerTime,
-        down: wan.status === "up" ? trafficValue(wan.download_bps) : null,
-        up: wan.status === "up" ? trafficValue(wan.upload_bps) : null,
-        interval: Number(wan.poll_seconds) || 2
-      });
-      if (history.router.length > historyLimit) history.router.shift();
-    }
     if (!data.server_time || timestamp === lastHistoryTime) return;
     lastHistoryTime = timestamp;
     var devices = {};
@@ -151,6 +138,30 @@
     });
     history.devices.push(devices);
     if (history.devices.length > historyLimit) history.devices.shift();
+  }
+
+  function rememberRouter(packet) {
+    routerServerTime = Number(packet.server_time) || Date.now() / 1000;
+    var latest = packet.wan || {};
+    routerSampleState = latest.status === "error" ? "读取失败" :
+      (latest.download_held || latest.upload_held) ? "等待计数器刷新" : "";
+    if (packet.wan_generation !== routerGeneration || (packet.wan || {}).status === "disabled") {
+      routerGeneration = packet.wan_generation;
+      history.router = [];
+      lastRouterSampleTime = 0;
+    }
+    (packet.wan_samples || []).forEach(function (wan) {
+      var routerTime = Number(wan.sampled_at);
+      if (!isFinite(routerTime) || routerTime <= lastRouterSampleTime) return;
+      lastRouterSampleTime = routerTime;
+      history.router.push({
+        time: routerTime,
+        down: wan.status === "up" ? trafficValue(wan.download_bps) : null,
+        up: wan.status === "up" ? trafficValue(wan.upload_bps) : null,
+        interval: Number(wan.interval_seconds || wan.poll_seconds) || 1
+      });
+    });
+    history.router = history.router.filter(function (point) { return point.time >= routerServerTime - chartWindowSeconds; }).slice(-240);
   }
 
   function trafficValue(value) {
@@ -176,7 +187,8 @@
   }
 
   function chartCard(id, title, legend) {
-    return '<section class="chart-card"><div class="chart-title"><strong>' + escapeHtml(title) + '</strong></div>' +
+    return '<section class="chart-card"><div class="chart-title"><strong>' + escapeHtml(title) + '</strong>' +
+      (id === "router-chart" ? '<small id="router-sample-state"></small>' : '') + '</div>' +
       '<canvas id="' + id + '" class="throughput-chart" width="454" height="240"></canvas>' +
       '<div class="chart-legend">' + legend + '</div></section>';
   }
@@ -192,14 +204,6 @@
       '</div></section>';
   }
 
-  function niceMaximum(value) {
-    if (!value || value < 1000) return 1000;
-    var power = Math.pow(10, Math.floor(Math.log(value) / Math.LN10));
-    var scaled = value / power;
-    var nice = scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10;
-    return nice * power;
-  }
-
   function axisNumber(value) {
     if (value >= 1000000000) return (value / 1000000000).toFixed(value >= 10000000000 ? 0 : 1).replace(/\.0$/, "") + "G";
     if (value >= 1000000) return (value / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
@@ -207,7 +211,7 @@
     return String(Math.round(value));
   }
 
-  function drawChart(canvas, points, definitions) {
+  function drawChart(canvas, points, definitions, chartTime) {
     if (!canvas || !canvas.getContext) return;
     var context = canvas.getContext("2d");
     var width = canvas.width;
@@ -218,7 +222,7 @@
     var bottom = 18;
     var plotWidth = width - left - right;
     var plotHeight = height - top - bottom;
-    var endTime = Number(lastData && lastData.server_time) || Date.now() / 1000;
+    var endTime = Number(chartTime) || Number(lastData && lastData.server_time) || Date.now() / 1000;
     var startTime = endTime - chartWindowSeconds;
     points = points.filter(function (point) { return point.time >= startTime && point.time <= endTime; });
     var highest = points.reduce(function (highest, point) {
@@ -227,10 +231,8 @@
       });
       return highest;
     }, 0);
-    // Start at 0–50 Mbps; retain an expanded scale for this page session.
-    var maximum = chartMaximums[canvas.id] || 50000000;
-    if (highest > maximum) maximum = niceMaximum(highest);
-    chartMaximums[canvas.id] = maximum;
+    // A high sample holds its 50 Mbps tier until it leaves the visible window.
+    var maximum = Math.max(50000000, Math.ceil(highest / 50000000) * 50000000);
 
     context.clearRect(0, 0, width, height);
     context.font = "17px sans-serif";
@@ -248,13 +250,25 @@
       context.fillText(axisNumber(maximum * (4 - line) / 4), left - 9, y);
     }
 
-    function segment(vertices, color) {
+    function segment(vertices, color, stepped) {
       if (!vertices.length) return;
       if (vertices.length === 1) {
         context.beginPath();
         context.fillStyle = color;
         context.arc(vertices[0].x, vertices[0].y, 2, 0, Math.PI * 2);
         context.fill();
+        return;
+      }
+      if (stepped) {
+        // Each rate describes the interval ending at that sample, not a triangle
+        // interpolated towards a future sample. No moving average adds delay.
+        context.beginPath();
+        context.moveTo(vertices[0].x, vertices[0].y);
+        for (var step = 1; step < vertices.length; step += 1) {
+          context.lineTo(vertices[step - 1].x, vertices[step].y);
+          context.lineTo(vertices[step].x, vertices[step].y);
+        }
+        context.stroke();
         return;
       }
       var slopes = [], tangents = [];
@@ -298,7 +312,7 @@
         var value = trafficValue(point[definition.field]);
         var gap = previousTime != null && point.time - previousTime > Math.max(10, (point.interval || 2) * 3);
         if (value == null || gap) {
-          segment(vertices, definition.color);
+          segment(vertices, definition.color, definition.stepped);
           vertices = [];
         }
         if (value != null) vertices.push({
@@ -307,7 +321,7 @@
         });
         previousTime = point.time;
       });
-      segment(vertices, definition.color);
+      segment(vertices, definition.color, definition.stepped);
     }
 
     context.save();
@@ -317,6 +331,15 @@
     definitions.forEach(series);
     context.restore();
     context.setLineDash([]);
+  }
+
+  function drawRouterChart() {
+    var state = document.getElementById("router-sample-state");
+    if (state) state.textContent = routerSampleState;
+    drawChart(document.getElementById("router-chart"), history.router, [
+      { field: "down", color: "#7fb8ff", dashed: false, stepped: true },
+      { field: "up", color: "#7fb8ff", dashed: true, stepped: true }
+    ], routerServerTime);
   }
 
   function render(data, connectionState) {
@@ -340,10 +363,7 @@
       terminalPanel(data.terminal) + networkCharts();
     var output = document.getElementById("ubuntu-terminal-output");
     if (output) output.scrollTop = output.scrollHeight;
-    drawChart(document.getElementById("router-chart"), history.router, [
-      { field: "down", color: "#7fb8ff", dashed: false },
-      { field: "up", color: "#7fb8ff", dashed: true }
-    ]);
+    drawRouterChart();
     var deviceDefinitions = [];
     slots.forEach(function (slot) {
       deviceDefinitions.push({ field: slot.key + "_down", color: slot.color, dashed: false });
@@ -359,6 +379,13 @@
       try { render(JSON.parse(event.data), "live"); } catch (error) { console.error(error); }
     };
     events.onerror = function () { if (lastData) render(lastData, "waiting"); };
+    var wanEvents = new EventSource("/api/wan/events");
+    wanEvents.onmessage = function (event) {
+      try {
+        rememberRouter(JSON.parse(event.data));
+        drawRouterChart();
+      } catch (error) { console.error(error); }
+    };
   }
 
   fitStage();

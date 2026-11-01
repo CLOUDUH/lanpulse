@@ -31,26 +31,38 @@ function dashboard() {
     dashboard: { setAttribute() {} },
     "router-chart": canvas("router-chart"),
     "devices-chart": canvas("devices-chart"),
+    "router-sample-state": {},
   };
-  let events;
+  const streams = {};
   const errors = [];
   vm.runInNewContext(source, {
     document: { getElementById: id => elements[id] || null },
     window: { innerWidth: 1080, innerHeight: 1920, setInterval() {}, addEventListener() {} },
-    EventSource: function () { events = this; },
+    EventSource: function (url) { streams[url] = this; },
     console: { error: error => errors.push(error) },
   });
+  function packet(data) {
+    streams["/api/wan/events"].onmessage({ data: JSON.stringify(data) });
+    assert.equal(errors.length, 0, String(errors[0]));
+  }
+  function general(time) {
+    streams["/api/events"].onmessage({ data: JSON.stringify({ server_time: time, beszel: { systems: [] } }) });
+    assert.equal(errors.length, 0, String(errors[0]));
+  }
+  function wan(time, value, options = {}) {
+    const sample = { enabled: true, status: "up", sampled_at: time, download_bps: value, upload_bps: value / 2, ...options };
+    packet({ server_time: time, wan: sample, wan_generation: 1, wan_samples: [sample] });
+  }
   return {
     router: elements["router-chart"].context,
     devices: elements["devices-chart"].context,
+    packet,
+    general,
+    wan,
+    state: elements["router-sample-state"],
     emit(time, value, options = {}) {
-      const data = {
-        server_time: time,
-        wan: { enabled: true, status: "up", sampled_at: time, download_bps: value, upload_bps: value / 2, ...options },
-        beszel: { systems: [] },
-      };
-      events.onmessage({ data: JSON.stringify(data) });
-      assert.equal(errors.length, 0, String(errors[0]));
+      general(time);
+      wan(time, value, options);
     },
   };
 }
@@ -64,14 +76,22 @@ test("charts start at 50 Mbps with accurate quarter ticks", () => {
   assert.equal(app.devices.labels[0], "50M");
 });
 
-test("scales expand only when exceeded and do not bounce back", () => {
+test("scales use 50 Mbps multiples and return after the peak leaves the window", () => {
   const app = dashboard();
   app.emit(1000, 50000000);
   assert.equal(app.router.labels[0], "50M");
   app.emit(1002, 60000000);
   assert.equal(app.router.labels[0], "100M");
-  app.emit(1200, 1000000);
+  app.emit(1121, 1000000);
   assert.equal(app.router.labels[0], "100M");
+  app.emit(1123, 1000000);
+  assert.equal(app.router.labels[0], "50M");
+  app.emit(1124, 110000000);
+  assert.equal(app.router.labels[0], "150M");
+  app.emit(1125, 201000000);
+  assert.equal(app.router.labels[0], "250M");
+  app.emit(1246, 1000000);
+  assert.equal(app.router.labels[0], "50M");
   assert.equal(app.devices.labels[0], "50M");
 });
 
@@ -80,9 +100,10 @@ test("few samples occupy their true time span instead of stretched triangles", (
   app.emit(1000, 10000000);
   app.emit(1002, 20000000);
   const vertices = downloadPaths(app.router)[0].vertices;
-  assert.equal(vertices.length, 2);
-  assert.equal(vertices[1].type, "curve");
-  const dx = vertices[1].values[4] - vertices[0].x;
+  assert.equal(vertices.length, 3);
+  assert.equal(vertices[1].type, "line");
+  assert.equal(vertices[1].x, vertices[0].x);
+  const dx = vertices[2].x - vertices[0].x;
   assert.ok(Math.abs(dx - 378 * 2 / 120) < 0.000001);
 });
 
@@ -102,9 +123,9 @@ test("failed samples create a gap, not a dive to zero", () => {
   app.emit(1006, 30000000);
   const paths = downloadPaths(app.router);
   assert.equal(paths.length, 1);
-  assert.equal(paths[0].vertices.length, 2);
+  assert.equal(paths[0].vertices.length, 3);
   assert.ok(paths[0].vertices[0].y < 222);
-  assert.ok(paths[0].vertices[1].values[5] < 222);
+  assert.ok(paths[0].vertices[2].y < 222);
   assert.equal(app.router.dots.length, 2);
 });
 
@@ -116,17 +137,15 @@ test("long sampling outages are not bridged by invented data", () => {
   assert.equal(app.router.dots.length, 4);
 });
 
-test("smooth segments stay within the actual adjacent sample values", () => {
+test("router rates are horizontal interval segments, never widening cubic peaks", () => {
   const app = dashboard();
   [5, 40, 5, 30, 30, 20].forEach((value, index) => app.emit(1000 + index * 2, value * 1000000));
   const vertices = downloadPaths(app.router)[0].vertices;
-  let fromY = vertices[0].y;
-  for (const vertex of vertices.slice(1)) {
-    const [, firstY, , secondY, , toY] = vertex.values;
-    const low = Math.min(fromY, toY), high = Math.max(fromY, toY);
-    assert.ok(firstY >= low - 1e-9 && firstY <= high + 1e-9);
-    assert.ok(secondY >= low - 1e-9 && secondY <= high + 1e-9);
-    fromY = toY;
+  assert.equal(vertices.length, 11);
+  for (let i = 1; i < vertices.length; i += 2) {
+    assert.equal(vertices[i].type, "line");
+    assert.equal(vertices[i].x, vertices[i - 1].x);
+    assert.equal(vertices[i].y, vertices[i + 1].y);
   }
 });
 
@@ -136,5 +155,40 @@ test("true zero traffic remains visible at the baseline", () => {
   app.emit(1002, 0);
   const vertices = downloadPaths(app.router)[0].vertices;
   assert.equal(vertices[0].y, 222);
-  assert.equal(vertices[1].values[5], 222);
+  assert.equal(vertices[2].y, 222);
+});
+
+test("WAN charts render before any slow general dashboard response", () => {
+  const app = dashboard();
+  app.wan(1000, 60000000);
+  app.wan(1001, 60000000);
+  assert.equal(app.router.labels[0], "100M");
+  assert.equal(downloadPaths(app.router).length, 1);
+  app.general(990);
+  assert.equal(app.router.labels[0], "100M");
+  assert.equal(downloadPaths(app.router).length, 1);
+});
+
+test("reconnect backfills more than 60 one-second samples from the shared history", () => {
+  const app = dashboard();
+  const samples = Array.from({ length: 100 }, (_, i) => ({
+    status: "up", sampled_at: 1000 + i, download_bps: 10000000, upload_bps: 1000000,
+  }));
+  app.packet({ server_time: 1099, wan_generation: 1, wan: samples[99], wan_samples: samples });
+  assert.equal(downloadPaths(app.router)[0].vertices.length, 199);
+});
+
+test("heartbeat alone releases an old expanded scale", () => {
+  const app = dashboard();
+  app.wan(1000, 90000000);
+  app.packet({ server_time: 1121, wan_generation: 1, wan: { status: "up" }, wan_samples: [] });
+  assert.equal(app.router.labels[0], "50M");
+});
+
+test("a held rate is visibly marked as waiting for the device counter", () => {
+  const app = dashboard();
+  app.wan(1000, 10000000, { download_held: true });
+  assert.equal(app.state.textContent, "等待计数器刷新");
+  app.wan(1001, 10000000, { download_held: false });
+  assert.equal(app.state.textContent, "");
 });

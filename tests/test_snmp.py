@@ -108,3 +108,77 @@ class SnmpCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.collector._get_pair = AsyncMock(return_value=(3000, 1500))
         result = await self.collector.sample(self.config)
         self.assertEqual(result["download_bps"], 8000)
+
+    async def test_batched_counters_do_not_alternate_zero_and_doubled_rates(self):
+        self.config["poll_seconds"] = 1
+        self.collector._get_pair = AsyncMock(side_effect=[
+            (0, 0), (0, 0), (3000, 600), (3000, 600), (6000, 1200),
+        ])
+        results = []
+        for _ in range(5):
+            results.append(await self.collector.sample(self.config))
+            self.now += 1
+        self.assertEqual([result["download_bps"] for result in results[2:]], [12000, 12000, 12000])
+        self.assertTrue(results[3]["download_held"])
+        self.assertEqual(results[3]["raw_download_bps"], 0)
+        self.assertEqual(results[4]["raw_download_bps"], 24000)
+
+    async def test_rate_hold_expires_when_traffic_stops(self):
+        self.config["poll_seconds"] = 1
+        self.collector._get_pair = AsyncMock(side_effect=[(0, 0), (1000, 500), (1000, 500), (1000, 500)])
+        await self.collector.sample(self.config)
+        self.now += 1
+        await self.collector.sample(self.config)
+        self.now += 1
+        held = await self.collector.sample(self.config)
+        self.assertTrue(held["download_held"])
+        self.now += 1
+        idle = await self.collector.sample(self.config)
+        self.assertFalse(idle["download_held"])
+        self.assertEqual(idle["download_bps"], 0)
+
+    async def test_raw_counter_mode_can_be_selected(self):
+        self.config.update(poll_seconds=1, counter_window_seconds=0)
+        self.collector._get_pair = AsyncMock(side_effect=[(0, 0), (0, 0), (3000, 600), (3000, 600)])
+        results = []
+        for _ in range(4):
+            results.append(await self.collector.sample(self.config))
+            self.now += 1
+        self.assertEqual(results[2]["download_bps"], 24000)
+        self.assertEqual(results[3]["download_bps"], 0)
+
+    async def test_poll_latency_does_not_double_the_sampling_period(self):
+        self.config["poll_seconds"] = 1
+
+        async def read_pair(_):
+            self.now += 0.2
+            return (int(self.now * 1000), int(self.now * 500))
+
+        self.collector._get_pair = AsyncMock(side_effect=read_pair)
+        await self.collector.sample(self.config)
+        self.now = 101.0
+        result = await self.collector.sample(self.config)
+        self.assertEqual(self.collector._get_pair.await_count, 2)
+        self.assertEqual(result["status"], "up")
+
+    async def test_transport_and_engine_are_reused_until_shutdown(self):
+        engine = SimpleNamespace(close_dispatcher=unittest.mock.Mock())
+        self.collector._target = AsyncMock(return_value=object())
+        with patch("app.snmp.SnmpEngine", return_value=engine) as create_engine, \
+                patch("app.snmp.get_cmd", AsyncMock(return_value=(None, 0, 0, [(None, 1000), (None, 500)]))):
+            await self.collector._get_pair(self.config)
+            await self.collector._get_pair(self.config)
+        self.assertEqual(create_engine.call_count, 1)
+        self.collector._target.assert_awaited_once()
+        engine.close_dispatcher.assert_not_called()
+        await self.collector.close()
+        engine.close_dispatcher.assert_called_once()
+
+    async def test_background_poll_does_not_skip_an_early_timer_tick(self):
+        self.config["poll_seconds"] = 1
+        self.collector._get_pair = AsyncMock(side_effect=[(0, 0), (1000, 500)])
+        await self.collector.sample(self.config, force=True)
+        self.now += 0.9995
+        sample = await self.collector.sample(self.config, force=True)
+        self.assertEqual(self.collector._get_pair.await_count, 2)
+        self.assertEqual(sample["status"], "up")
