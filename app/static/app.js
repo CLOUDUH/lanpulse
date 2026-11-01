@@ -5,8 +5,11 @@
   var dashboard = document.getElementById("dashboard");
   var lastData = null;
   var lastHistoryTime = 0;
+  var lastRouterSampleTime = 0;
   var history = { router: [], devices: [] };
   var historyLimit = 60;
+  var chartWindowSeconds = 120;
+  var chartMaximums = {};
   var clockEpoch = Date.now();
   var clockReceivedAt = Date.now();
   var slots = [
@@ -122,19 +125,37 @@
 
   function rememberNetwork(data, matched) {
     var timestamp = Number(data.server_time) || Date.now() / 1000;
-    if (timestamp === lastHistoryTime) return;
-    lastHistoryTime = timestamp;
     var wan = data.wan || {};
+    var routerTime = Number(wan.sampled_at);
+    if (wan.status === "disabled") {
+      history.router = [];
+      lastRouterSampleTime = 0;
+    } else if (isFinite(routerTime) && routerTime > lastRouterSampleTime) {
+      lastRouterSampleTime = routerTime;
+      history.router.push({
+        time: routerTime,
+        down: wan.status === "up" ? trafficValue(wan.download_bps) : null,
+        up: wan.status === "up" ? trafficValue(wan.upload_bps) : null,
+        interval: Number(wan.poll_seconds) || 2
+      });
+      if (history.router.length > historyLimit) history.router.shift();
+    }
+    if (!data.server_time || timestamp === lastHistoryTime) return;
+    lastHistoryTime = timestamp;
     var devices = {};
+    devices.time = timestamp;
     slots.forEach(function (slot, index) {
       var system = matched[index] || {};
       devices[slot.key + "_down"] = Number(system.network_down_bps) || 0;
       devices[slot.key + "_up"] = Number(system.network_up_bps) || 0;
     });
-    history.router.push({ down: Number(wan.download_bps) || 0, up: Number(wan.upload_bps) || 0 });
     history.devices.push(devices);
-    if (history.router.length > historyLimit) history.router.shift();
     if (history.devices.length > historyLimit) history.devices.shift();
+  }
+
+  function trafficValue(value) {
+    if (value == null || !isFinite(Number(value)) || Number(value) < 0) return null;
+    return Number(value);
   }
 
   function terminalPanel(terminal) {
@@ -181,7 +202,7 @@
 
   function axisNumber(value) {
     if (value >= 1000000000) return (value / 1000000000).toFixed(value >= 10000000000 ? 0 : 1).replace(/\.0$/, "") + "G";
-    if (value >= 1000000) return (value / 1000000).toFixed(value >= 10000000 ? 0 : 1).replace(/\.0$/, "") + "M";
+    if (value >= 1000000) return (value / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
     if (value >= 1000) return (value / 1000).toFixed(value >= 10000 ? 0 : 1).replace(/\.0$/, "") + "K";
     return String(Math.round(value));
   }
@@ -197,12 +218,19 @@
     var bottom = 18;
     var plotWidth = width - left - right;
     var plotHeight = height - top - bottom;
-    var maximum = niceMaximum(points.reduce(function (highest, point) {
+    var endTime = Number(lastData && lastData.server_time) || Date.now() / 1000;
+    var startTime = endTime - chartWindowSeconds;
+    points = points.filter(function (point) { return point.time >= startTime && point.time <= endTime; });
+    var highest = points.reduce(function (highest, point) {
       definitions.forEach(function (definition) {
         highest = Math.max(highest, Number(point[definition.field]) || 0);
       });
       return highest;
-    }, 0));
+    }, 0);
+    // Start at 0–50 Mbps; retain an expanded scale for this page session.
+    var maximum = chartMaximums[canvas.id] || 50000000;
+    if (highest > maximum) maximum = niceMaximum(highest);
+    chartMaximums[canvas.id] = maximum;
 
     context.clearRect(0, 0, width, height);
     context.font = "17px sans-serif";
@@ -220,24 +248,74 @@
       context.fillText(axisNumber(maximum * (4 - line) / 4), left - 9, y);
     }
 
-    function series(definition) {
-      if (!points.length) return;
+    function segment(vertices, color) {
+      if (!vertices.length) return;
+      if (vertices.length === 1) {
+        context.beginPath();
+        context.fillStyle = color;
+        context.arc(vertices[0].x, vertices[0].y, 2, 0, Math.PI * 2);
+        context.fill();
+        return;
+      }
+      var slopes = [], tangents = [];
+      for (var i = 0; i < vertices.length - 1; i += 1) {
+        slopes.push((vertices[i + 1].y - vertices[i].y) / (vertices[i + 1].x - vertices[i].x));
+      }
+      tangents[0] = slopes[0];
+      tangents[vertices.length - 1] = slopes[slopes.length - 1];
+      for (var j = 1; j < vertices.length - 1; j += 1) {
+        tangents[j] = slopes[j - 1] * slopes[j] <= 0 ? 0 :
+          2 / (1 / slopes[j - 1] + 1 / slopes[j]);
+      }
+      // Limit the Hermite tangents so curves cannot overshoot the actual samples.
+      slopes.forEach(function (slope, index) {
+        if (slope === 0) { tangents[index] = 0; tangents[index + 1] = 0; return; }
+        var a = tangents[index] / slope, b = tangents[index + 1] / slope;
+        var length = Math.sqrt(a * a + b * b);
+        if (length > 3) {
+          tangents[index] = 3 * a * slope / length;
+          tangents[index + 1] = 3 * b * slope / length;
+        }
+      });
       context.beginPath();
+      context.moveTo(vertices[0].x, vertices[0].y);
+      for (var k = 0; k < vertices.length - 1; k += 1) {
+        var from = vertices[k], to = vertices[k + 1], dx = (to.x - from.x) / 3;
+        context.bezierCurveTo(from.x + dx, from.y + tangents[k] * dx,
+          to.x - dx, to.y - tangents[k + 1] * dx, to.x, to.y);
+      }
+      context.stroke();
+    }
+
+    function series(definition) {
       context.strokeStyle = definition.color;
       context.lineWidth = 3;
       context.setLineDash(definition.dashed ? [10, 8] : []);
       context.lineJoin = "round";
       context.lineCap = "round";
-      points.forEach(function (point, index) {
-        var x = points.length === 1 ? left : left + plotWidth * index / (points.length - 1);
-        var y = top + plotHeight * (1 - Math.min(Number(point[definition.field]) || 0, maximum) / maximum);
-        if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      var vertices = [], previousTime = null;
+      points.forEach(function (point) {
+        var value = trafficValue(point[definition.field]);
+        var gap = previousTime != null && point.time - previousTime > Math.max(10, (point.interval || 2) * 3);
+        if (value == null || gap) {
+          segment(vertices, definition.color);
+          vertices = [];
+        }
+        if (value != null) vertices.push({
+          x: left + plotWidth * (point.time - startTime) / chartWindowSeconds,
+          y: top + plotHeight * (1 - Math.min(value, maximum) / maximum)
+        });
+        previousTime = point.time;
       });
-      if (points.length === 1) context.lineTo(width - right, top + plotHeight * (1 - Math.min(Number(points[0][definition.field]) || 0, maximum) / maximum));
-      context.stroke();
+      segment(vertices, definition.color);
     }
 
+    context.save();
+    context.beginPath();
+    context.rect(left, top, plotWidth, plotHeight);
+    context.clip();
     definitions.forEach(series);
+    context.restore();
     context.setLineDash([]);
   }
 

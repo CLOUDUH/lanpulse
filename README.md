@@ -86,6 +86,8 @@ tail -n 80 ~/training.log
 
 系统负载显示 Beszel 的 1 分钟 load average；指示条优先按系统逻辑线程数归一化。天气数据每 10–180 分钟缓存刷新，默认 30 分钟；外部天气服务短时不可用时会继续显示最近一次成功结果。
 
+网络曲线按真实采样时间显示最近 120 秒，平滑连线经过原始采样点且不会生成超出相邻样本的尖峰。SNMP 首次预热、读取失败及长时间断线显示为空缺，不补零；多个浏览器共享同一轮 SNMP 采样。两张图的纵轴均从 `0–50 Mbps` 起步，超出后按 `100M / 200M / 500M…` 扩展；同次页面访问期间保留已扩展的刻度，刷新页面后重新从 50M 起步。
+
 ## 运维与安全边界
 
 - 项目定位是可信局域网看板，不应直接映射到公网。
@@ -97,6 +99,7 @@ tail -n 80 ~/training.log
 
 ```bash
 python3 -m unittest discover -s tests -v
+node --test tests/test_dashboard.js
 docker compose config
 docker compose build
 ```
